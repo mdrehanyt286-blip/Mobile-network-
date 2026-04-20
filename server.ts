@@ -2,6 +2,7 @@ import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import axios from 'axios';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -11,6 +12,18 @@ async function startServer() {
   const PORT = 3000;
 
   app.use(express.json());
+
+  // ISP Proxy to avoid CORS errors
+  app.get('/api/isp', async (req, res) => {
+    try {
+      // Use ip-api.com for better reliability
+      const response = await axios.get('http://ip-api.com/json/');
+      res.json(response.data);
+    } catch (error) {
+      console.error('Server ISP Proxy Error:', error);
+      res.status(500).json({ status: 'error', message: 'Detection failed' });
+    }
+  });
 
   // Performance test endpoint
   app.post('/api/upload-test', (req, res) => {

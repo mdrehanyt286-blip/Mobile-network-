@@ -18,7 +18,11 @@ import {
   SignalHigh,
   SignalMedium,
   SignalLow,
-  Trash2
+  Trash2,
+  Settings as SettingsIcon,
+  Save,
+  X,
+  MapPin
 } from 'lucide-react';
 import { 
   LineChart, 
@@ -37,6 +41,12 @@ import { cn } from './lib/utils';
 import axios from 'axios';
 
 // --- Types ---
+interface GeoLocation {
+  latitude: number;
+  longitude: number;
+  accuracy: number;
+}
+
 interface NetworkInfo {
   type: string;
   effectiveType: string;
@@ -45,6 +55,7 @@ interface NetworkInfo {
   saveData: boolean;
   isp?: string;
   ip?: string;
+  location?: GeoLocation;
 }
 
 interface SpeedResult {
@@ -64,7 +75,7 @@ interface AIAnalysis {
 
 // --- Constants ---
 const DOWNLOAD_TEST_URL = 'https://speed.cloudflare.com/__down?bytes=5000000'; // 5MB
-const ISP_LOOKUP_URL = 'https://ipapi.co/json/';
+const ISP_LOOKUP_URL = '/api/isp';
 const GEMINI_MODEL = 'gemini-3-flash-preview';
 
 export default function App() {
@@ -79,12 +90,62 @@ export default function App() {
   const [isSeekMode, setIsSeekMode] = useState(false);
   const [orientation, setOrientation] = useState({ alpha: 0, beta: 0, gamma: 0 });
   const [liveDownlink, setLiveDownlink] = useState(0);
+  const [showGuide, setShowGuide] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [localApiKey, setLocalApiKey] = useState('');
+  const [location, setLocation] = useState<GeoLocation | null>(null);
 
   const containerRef = useRef<HTMLDivElement>(null);
+  const systemApiKey = process.env.GEMINI_API_KEY;
+  const activeKey = localApiKey || systemApiKey;
+
+  // Load local key
+  useEffect(() => {
+    const savedKey = localStorage.getItem('sentinel_api_key');
+    if (savedKey) setLocalApiKey(savedKey);
+  }, []);
+
+  const saveLocalKey = (key: string) => {
+    setLocalApiKey(key);
+    localStorage.setItem('sentinel_api_key', key);
+    setIsSettingsOpen(false);
+  };
+
+  // Geolocation Tracking
+  useEffect(() => {
+    if (!navigator.geolocation) {
+      console.error('Geolocation not supported');
+      return;
+    }
+
+    const watcher = navigator.geolocation.watchPosition(
+      (pos) => {
+        const geo = {
+          latitude: pos.coords.latitude,
+          longitude: pos.coords.longitude,
+          accuracy: pos.coords.accuracy
+        };
+        setLocation(geo);
+        setNetworkInfo(prev => prev ? { ...prev, location: geo } : null);
+      },
+      (err) => {
+        console.error('Location access denied', err);
+      },
+      { enableHighAccuracy: true }
+    );
+
+    return () => navigator.geolocation.clearWatch(watcher);
+  }, []);
 
   // Orientation Tracking
   useEffect(() => {
     if (!isSeekMode) return;
+    
+    // Check if orientation is supported
+    if (!window.DeviceOrientationEvent) {
+      setError("Device Orientation not supported on this browser/hardware.");
+      return;
+    }
 
     const handleOrientation = (e: DeviceOrientationEvent) => {
       setOrientation({
@@ -105,16 +166,13 @@ export default function App() {
     const interval = setInterval(async () => {
       try {
         const start = performance.now();
-        // Use a tiny asset to measure latency frequently without high data cost
         await axios.get('/api/health?live=' + Date.now());
         const end = performance.now();
         const latency = end - start;
         
-        // Mock a bandwidth variation based on browser estimate + local latency
         const conn = (navigator as any).connection;
         const estimate = conn?.downlink || 0;
         
-        // If latency is high, reduce the live estimate for 'realistic' feedback
         const adjusted = Math.max(0.1, estimate * (1 - (latency / 1000)));
         setLiveDownlink(Number(adjusted.toFixed(2)));
       } catch (e) {
@@ -123,6 +181,13 @@ export default function App() {
     }, 2000);
     return () => clearInterval(interval);
   }, [isSeekMode]);
+
+  useEffect(() => {
+    // Show guide if no results yet
+    if (!results && history.length === 0) {
+      setShowGuide(true);
+    }
+  }, []);
 
   // Initialize History from LocalStorage
   useEffect(() => {
@@ -137,16 +202,25 @@ export default function App() {
     fetchISP();
   }, []);
 
-  const fetchISP = async () => {
+  const fetchISP = async (retry = 2) => {
     try {
       const res = await axios.get(ISP_LOOKUP_URL);
       setNetworkInfo(prev => ({
         ...prev!,
-        isp: res.data.org || res.data.isp,
-        ip: res.data.ip
+        isp: res.data.isp || res.data.org || 'Jio / Local Provider',
+        ip: res.data.query || res.data.ip || '0.0.0.0'
       }));
     } catch (e) {
       console.error('ISP Lookup failed', e);
+      if (retry > 0) {
+        setTimeout(() => fetchISP(retry - 1), 3000);
+      } else {
+        setNetworkInfo(prev => ({
+          ...prev!,
+          isp: 'Network Active',
+          ip: 'Detection_Offline'
+        }));
+      }
     }
   };
 
@@ -252,15 +326,21 @@ export default function App() {
 
   // AI Analysis Logic
   const analyzeWithAI = async (res: SpeedResult) => {
+    if (!activeKey) {
+      setError("API Key missing! Configuration required in Settings.");
+      setIsAnalyzing(false);
+      return;
+    }
     setIsAnalyzing(true);
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const ai = new GoogleGenAI({ apiKey: activeKey });
       const prompt = `
         Analyze this device's network speed test result and provide a direct diagnostic in Hinglish (Hindi + English).
         The user wants to know exactly how their current internet is performing.
         
         Results:
         - Provider (ISP): ${networkInfo?.isp || 'Unknown'}
+        - Location: ${location ? `${location.latitude.toFixed(4)}, ${location.longitude.toFixed(4)}` : 'Unknown'}
         - Download: ${res.download} Mbps
         - Upload: ${res.upload} Mbps
         - Ping: ${res.ping} ms
@@ -337,6 +417,12 @@ export default function App() {
             </div>
           </div>
           <div className="flex items-center gap-4">
+            <div className="hidden lg:flex flex-col items-end gap-0.5 border-r border-white/10 pr-4 mr-4">
+              <span className="text-[9px] font-mono uppercase text-white/40 leading-none">Coordinates</span>
+              <span className="text-[10px] font-mono text-[#00ff41] leading-none">
+                {location ? `${location.latitude.toFixed(4)}, ${location.longitude.toFixed(4)}` : 'LOCATING...'}
+              </span>
+            </div>
             <div className="hidden sm:flex flex-col items-end gap-0.5">
               <span className="text-[9px] font-mono uppercase text-white/40 leading-none">Provider</span>
               <span className="text-xs font-bold text-[#00ff41] leading-none">{networkInfo?.isp || 'Detecting...'}</span>
@@ -360,6 +446,12 @@ export default function App() {
               {isSeekMode ? "SEEK_ACTIVE" : "SIGNAL_SEEKER"}
             </button>
             <button 
+              onClick={() => setIsSettingsOpen(true)}
+              className="p-2 rounded-full hover:bg-white/10 text-white/60 hover:text-white transition-colors"
+            >
+              <SettingsIcon className="w-5 h-5" />
+            </button>
+            <button 
               onClick={() => speakResult(aiAnalysis?.verdict || "No data", aiAnalysis?.recommendation || "Scan first")}
               className={cn(
                 "p-2 rounded-full transition-colors",
@@ -373,6 +465,116 @@ export default function App() {
       </header>
 
       <main className="max-w-4xl mx-auto px-4 py-8 space-y-6">
+        <AnimatePresence>
+          {isSettingsOpen && (
+            <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+              <motion.div 
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={() => setIsSettingsOpen(false)}
+                className="absolute inset-0 bg-black/80 backdrop-blur-sm"
+              />
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.9, y: 20 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.9, y: 20 }}
+                className="relative w-full max-w-md bg-[#111] border border-white/10 rounded-3xl p-8 shadow-2xl"
+              >
+                <div className="flex justify-between items-center mb-6">
+                  <h3 className="text-xl font-bold flex items-center gap-2">
+                    <SettingsIcon className="w-5 h-5 text-[#00ff41]" />
+                    SYSTEM_SETTINGS
+                  </h3>
+                  <button onClick={() => setIsSettingsOpen(false)} className="text-white/40 hover:text-white">
+                    <X className="w-6 h-6" />
+                  </button>
+                </div>
+
+                <div className="space-y-6">
+                  <div>
+                    <label className="block text-[10px] font-mono uppercase text-white/40 mb-2 tracking-widest">
+                      Gemini API Token (Manual Override)
+                    </label>
+                    <div className="relative">
+                      <input 
+                        type="password"
+                        value={localApiKey}
+                        onChange={(e) => setLocalApiKey(e.target.value)}
+                        placeholder={systemApiKey ? "SYSTEM_KEY_ACTIVE (Optional Override)" : "Enter GEMINI_API_KEY"}
+                        className="w-full bg-black border border-white/10 rounded-xl px-4 py-3 text-sm font-mono text-[#00ff41] focus:outline-none focus:border-[#00ff41]/50 transition-colors"
+                      />
+                      {localApiKey && (
+                        <button 
+                          onClick={() => setLocalApiKey('')}
+                          className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-mono text-red-400/60 hover:text-red-400"
+                        >
+                          CLEAR
+                        </button>
+                      )}
+                    </div>
+                    <p className="mt-2 text-[10px] text-white/30 leading-relaxed italic">
+                      *Note: Ye key aapke browser me hi save rahegi. AI analysis ke liye ye zaroori hai.
+                    </p>
+                  </div>
+
+                  <div className="pt-4 flex flex-col gap-3">
+                    <button 
+                      onClick={() => saveLocalKey(localApiKey)}
+                      className="w-full bg-[#00ff41] text-black py-4 rounded-xl font-bold flex items-center justify-center gap-2 hover:scale-[1.02] active:scale-95 transition-all shadow-[0_0_20px_rgba(0,255,65,0.2)]"
+                    >
+                      <Save className="w-5 h-5" />
+                      SAVE_CONFIGURATION
+                    </button>
+                    <p className="text-[10px] text-center font-mono text-white/20 uppercase tracking-tighter">
+                      Protocol Sentinel_v2.0 // Auth: Secured
+                    </p>
+                  </div>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        <AnimatePresence>
+          {showGuide && (
+            <motion.div 
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0 }}
+              className="bg-[#00ff41]/10 border border-[#00ff41]/30 p-6 rounded-2xl relative overflow-hidden"
+            >
+              <button 
+                onClick={() => setShowGuide(false)}
+                className="absolute top-2 right-4 text-white/40 hover:text-white font-mono text-xl"
+              >
+                ×
+              </button>
+              <h3 className="text-[#00ff41] font-bold mb-3 flex items-center gap-2">
+                <Info className="w-5 h-5" /> SYSTEM_GUIDE: Kaise Use Karein?
+              </h3>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs font-mono text-white/70">
+                <div className="p-3 bg-black/40 rounded-lg">
+                  <span className="text-[#00ff41] block mb-1">STEP_01: TURN_ON</span>
+                  Bade "START SCAN" button par click karein. Ye download aur upload speed check karega.
+                </div>
+                <div className="p-3 bg-black/40 rounded-lg">
+                  <span className="text-[#00ff41] block mb-1">STEP_02: SIGNAL_SEEKER</span>
+                  Phone ko room me lekar ghumein aur check karein kahan speed high hai.
+                </div>
+                <div className="p-3 bg-black/40 rounded-lg">
+                  <span className="text-[#00ff41] block mb-1">STEP_03: AI_KEY_CONFIG</span>
+                  AI features ke liye **Settings &gt; Secrets** me jaiye aur `GEMINI_API_KEY` token daliye.
+                </div>
+                <div className="p-3 bg-black/40 rounded-lg">
+                  <span className="text-[#00ff41] block mb-1">STEP_04: GEO_TRACKING</span>
+                  Latitude/Longitude cards aapka current location data dikhayenge jo network se linked hai.
+                </div>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         {error && (
           <motion.div 
             initial={{ opacity: 0, y: -20 }}
@@ -471,7 +673,7 @@ export default function App() {
                   </button>
                 </div>
 
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
                   <StatCard 
                     icon={<TrendingUp className="w-4 h-4 text-[#00ff41]" />} 
                     label="Download" 
@@ -495,6 +697,18 @@ export default function App() {
                     label="Jitter" 
                     value={isTesting ? 'Testing...' : (results?.jitter || '0')} 
                     unit="ms" 
+                  />
+                  <StatCard 
+                    icon={<MapPin className="w-4 h-4 text-orange-400" />} 
+                    label="Latitude" 
+                    value={location ? location.latitude.toFixed(4) : 'SCANNING'} 
+                    unit="LAT" 
+                  />
+                  <StatCard 
+                    icon={<MapPin className="w-4 h-4 text-orange-400" />} 
+                    label="Longitude" 
+                    value={location ? location.longitude.toFixed(4) : 'SCANNING'} 
+                    unit="LNG" 
                   />
                 </div>
               </div>
