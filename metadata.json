@@ -1,0 +1,6 @@
+{
+  "name": "Network Sentinel AI",
+  "description": "AI-powered mobile internet speed tester and provider analyzer. Detects your ISP (Jio, Airtel, etc.) and provides smart performance diagnostics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
